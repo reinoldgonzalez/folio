@@ -21,23 +21,23 @@ export default defineConfig({
         background_color: "#121110",
         display: "standalone",
         orientation: "portrait-primary",
-        start_url: "/",
-        scope: "/",
+        start_url: "./",
+        scope: "./",
         icons: [
           {
-            src: "/icon.svg",
+            src: "icon.svg",
             sizes: "any",
             type: "image/svg+xml",
             purpose: "any",
           },
           {
-            src: "/pwa-192.png",
+            src: "pwa-192.png",
             sizes: "192x192",
             type: "image/png",
             purpose: "any",
           },
           {
-            src: "/pwa-512.png",
+            src: "pwa-512.png",
             sizes: "512x512",
             type: "image/png",
             purpose: "any maskable",
@@ -46,7 +46,7 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg,jpg,jpeg,webp,woff2}"],
-        navigateFallback: "/index.html",
+        navigateFallback: "index.html",
       },
       devOptions: {
         enabled: false,
