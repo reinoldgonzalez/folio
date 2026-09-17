@@ -11,7 +11,7 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["icon.svg", "apple-touch-icon.png", "cards/**/*"],
+      includeAssets: ["favicon-32.png", "apple-touch-icon.png", "pwa-192.png", "pwa-512.png", "cards/**/*"],
       manifest: {
         name: "Folio",
         short_name: "Folio",
@@ -25,12 +25,6 @@ export default defineConfig({
         scope: "./",
         icons: [
           {
-            src: "icon.svg",
-            sizes: "any",
-            type: "image/svg+xml",
-            purpose: "any",
-          },
-          {
             src: "pwa-192.png",
             sizes: "192x192",
             type: "image/png",
@@ -40,7 +34,13 @@ export default defineConfig({
             src: "pwa-512.png",
             sizes: "512x512",
             type: "image/png",
-            purpose: "any maskable",
+            purpose: "any",
+          },
+          {
+            src: "pwa-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "maskable",
           },
         ],
       },
