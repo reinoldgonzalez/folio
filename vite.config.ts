@@ -5,7 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
-  base: "/",
+  base: process.env.GITHUB_PAGES === 'true' ? '/folio/' : '/',
   plugins: [
     react(),
     tailwindcss(),
