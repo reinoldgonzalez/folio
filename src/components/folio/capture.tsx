@@ -22,7 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { CropEditor } from "@/components/folio/crop-editor";
 import { findDuplicates, type DuplicateMatch } from "@/lib/cards/duplicates";
 import { extractCardInfo } from "@/lib/cards/extract";
-import { fileToCompressedDataUrl } from "@/lib/cards/image";
+import { compressDataUrlForStorage, fileToCompressedDataUrl } from "@/lib/cards/image";
 import { useCardStore } from "@/lib/cards/store";
 import {
   EMPTY_FIELDS,
@@ -226,31 +226,48 @@ export function CaptureDialog() {
     setStep("review");
   };
 
-  const commitCreate = () => {
+  const storageImages = async () => {
+    if (!front) return null;
+    const frontImage = await compressDataUrlForStorage(front);
+    const backImage =
+      back === null || back === undefined
+        ? back ?? null
+        : back.startsWith("data:image/")
+          ? await compressDataUrlForStorage(back)
+          : back;
+    return { frontImage, backImage };
+  };
+
+  const commitCreate = async () => {
     if (!front) return;
+    const images = await storageImages();
+    if (!images) return;
     addCard({
       ...fields,
-      frontImage: front,
-      backImage: back,
+      frontImage: images.frontImage,
+      backImage: images.backImage,
     });
     toast.success("Filed by company");
   };
 
-  const commitUpdateExisting = (id: string) => {
+  const commitUpdateExisting = async (id: string) => {
+    const frontImage = front?.startsWith("data:image/")
+      ? await compressDataUrlForStorage(front)
+      : undefined;
+    let backImage: string | null | undefined;
+    if (back === null) backImage = null;
+    else if (back?.startsWith("data:image/"))
+      backImage = await compressDataUrlForStorage(back);
+    else backImage = undefined;
     mergeIntoCard(id, {
       ...fields,
-      frontImage: front?.startsWith("data:image/") ? front : undefined,
-      backImage:
-        back === null
-          ? null
-          : back?.startsWith("data:image/")
-            ? back
-            : undefined,
+      frontImage,
+      backImage,
     });
     toast.success("Updated existing card");
   };
 
-  const save = () => {
+  const save = async () => {
     if (!front) {
       toast.error("Add a photo of the front first.");
       return;
@@ -260,10 +277,12 @@ export function CaptureDialog() {
       return;
     }
     if (editing) {
+      const images = await storageImages();
+      if (!images) return;
       updateCard(editing.id, {
         ...fields,
-        frontImage: front,
-        backImage: back,
+        frontImage: images.frontImage,
+        backImage: images.backImage,
       });
       toast.success("Card updated");
       return;
@@ -275,7 +294,7 @@ export function CaptureDialog() {
       setStep("duplicate");
       return;
     }
-    commitCreate();
+    await commitCreate();
   };
 
   const patch = (key: keyof CardFields, value: string) => {

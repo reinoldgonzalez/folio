@@ -4,6 +4,35 @@ const WORK_MAX = 1600;
 const WORK_MAX_HUGE = 1280;
 const HUGE_LONGEST = 3500;
 
+export type CompressPurpose = "storage" | "ocr";
+
+type CompressTuning = {
+  startQuality: number;
+  minQuality: number;
+  maxWidth: number;
+  maxChars: number;
+  floorWidth: number;
+};
+
+const TUNING: Record<CompressPurpose, CompressTuning> = {
+  // Small enough for localStorage / many cards
+  storage: {
+    startQuality: 0.74,
+    minQuality: 0.44,
+    maxWidth: 1200,
+    maxChars: 180_000,
+    floorWidth: 640,
+  },
+  // Sharper working crop for Tesseract — still bounded for phone RAM
+  ocr: {
+    startQuality: 0.9,
+    minQuality: 0.72,
+    maxWidth: 1600,
+    maxChars: 700_000,
+    floorWidth: 1000,
+  },
+};
+
 function encode(
   source: CanvasImageSource,
   srcW: number,
@@ -21,6 +50,8 @@ function encode(
   if (!ctx) throw new Error("Could not read this photo");
   ctx.fillStyle = "#f4eee4";
   ctx.fillRect(0, 0, width, height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   ctx.drawImage(source, 0, 0, width, height);
   return canvas.toDataURL("image/jpeg", quality);
 }
@@ -56,7 +87,6 @@ async function loadWorkingBitmap(blob: Blob): Promise<ImageBitmap> {
   const h = Math.max(1, Math.round(full.height * scale));
 
   try {
-    // Preferred: browser-native resize from the already-decoded bitmap
     const resized = await createImageBitmap(full, {
       resizeWidth: w,
       resizeHeight: h,
@@ -65,21 +95,19 @@ async function loadWorkingBitmap(blob: Blob): Promise<ImageBitmap> {
     full.close();
     return resized;
   } catch {
-    // Fallback: canvas redraw then ImageBitmap from canvas
     try {
       const canvas = document.createElement("canvas");
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext("2d");
       if (!ctx) {
-        return full; // keep full if we cannot resize (rare)
+        return full;
       }
       ctx.drawImage(full, 0, 0, w, h);
       full.close();
       try {
         return await createImageBitmap(canvas);
       } catch {
-        // Last resort: re-decode from blob with resize options
         try {
           return await createImageBitmap(blob, {
             resizeWidth: w,
@@ -96,32 +124,65 @@ async function loadWorkingBitmap(blob: Blob): Promise<ImageBitmap> {
   }
 }
 
-/** Compress a captured photo into a JPEG data URL small enough for localStorage. */
+/** Compress a captured photo into a JPEG data URL. */
 export async function compressImage(
   source: ImageBitmap | HTMLCanvasElement,
+  purpose: CompressPurpose = "storage",
 ): Promise<string> {
   const { width, height } = sourceSize(source);
-  let quality = 0.74;
-  let maxWidth = 1200;
+  const tune = TUNING[purpose];
+  let quality = tune.startQuality;
+  let maxWidth = tune.maxWidth;
   let dataUrl = encode(source, width, height, maxWidth, quality);
 
-  while (dataUrl.length > 180_000 && quality > 0.44) {
-    quality -= 0.1;
+  while (dataUrl.length > tune.maxChars && quality > tune.minQuality) {
+    quality -= 0.08;
     dataUrl = encode(source, width, height, maxWidth, quality);
   }
-  while (dataUrl.length > 180_000 && maxWidth > 640) {
+  while (dataUrl.length > tune.maxChars && maxWidth > tune.floorWidth) {
     maxWidth -= 160;
-    dataUrl = encode(source, width, height, maxWidth, 0.5);
+    dataUrl = encode(source, width, height, maxWidth, tune.minQuality);
   }
 
   return dataUrl;
 }
 
 /**
- * Load → downscale for OOM safety → JPEG compress.
- * No auto-crop / perspective warp / clarity — manual CropEditor handles framing.
+ * Re-encode an existing data URL for long-term storage (after OCR is done).
  */
-export async function fileToCompressedDataUrl(file: File): Promise<string> {
+export async function compressDataUrlForStorage(dataUrl: string): Promise<string> {
+  if (!dataUrl.startsWith("data:image/")) return dataUrl;
+  // Already small enough — skip re-encode
+  if (dataUrl.length <= TUNING.storage.maxChars) return dataUrl;
+
+  const blob = await (await fetch(dataUrl)).blob();
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(blob);
+  } catch {
+    return dataUrl;
+  }
+  try {
+    return await compressImage(bitmap, "storage");
+  } catch {
+    return dataUrl;
+  } finally {
+    try {
+      bitmap.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
+ * Load → downscale for OOM safety → JPEG compress.
+ * Default purpose is OCR-quality working copy (crop/read); persist via storage compress.
+ */
+export async function fileToCompressedDataUrl(
+  file: File,
+  purpose: CompressPurpose = "ocr",
+): Promise<string> {
   if (!file.type.startsWith("image/") && file.type !== "") {
     throw new Error("Please choose a photo of the card.");
   }
@@ -136,10 +197,9 @@ export async function fileToCompressedDataUrl(file: File): Promise<string> {
 
   try {
     try {
-      return await compressImage(bitmap);
+      return await compressImage(bitmap, purpose);
     } catch {
-      // OOM / encode failure: last-resort simple JPEG
-      return encode(bitmap, bitmap.width, bitmap.height, 800, 0.5);
+      return encode(bitmap, bitmap.width, bitmap.height, purpose === "ocr" ? 1200 : 800, 0.5);
     }
   } finally {
     try {

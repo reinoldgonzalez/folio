@@ -31,6 +31,8 @@ function loadImage(dataUrl: string): Promise<HTMLImageElement> {
  *
  * For UI that measures a real frame, pass `viewport` matching that frame size so
  * panX/panY (in those pixels) map correctly.
+ *
+ * Output is OCR-quality JPEG (milder compress). Persist with compressDataUrlForStorage.
  */
 export async function applyPanZoomCrop(
   dataUrl: string,
@@ -56,7 +58,8 @@ export async function applyPanZoomCrop(
   const sw = (vw * nw) / displayW;
   const sh = (vh * nh) / displayH;
 
-  const outW = Math.min(1200, Math.max(1, Math.round(sw)));
+  // Keep more pixels for OCR; storage compress happens on save
+  const outW = Math.min(1600, Math.max(1, Math.round(sw)));
   const outH = Math.max(1, Math.round(outW / CARD_ASPECT));
 
   const canvas = document.createElement("canvas");
@@ -66,7 +69,9 @@ export async function applyPanZoomCrop(
   if (!ctx) throw new Error("Could not crop this photo");
   ctx.fillStyle = "#f4eee4";
   ctx.fillRect(0, 0, outW, outH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, outW, outH);
 
-  return compressImage(canvas);
+  return compressImage(canvas, "ocr");
 }
