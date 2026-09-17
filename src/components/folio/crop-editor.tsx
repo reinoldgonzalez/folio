@@ -102,6 +102,8 @@ export function CropEditor({
   }, [src]);
 
   // Lock page scroll / Chrome viewport pinch-zoom while the crop overlay is open.
+  // Also re-enable body pointer-events: Radix Dialog sets body to pointer-events:none,
+  // which makes a body-portaled overlay paint but never receive taps (dialog scrim steals them).
   useEffect(() => {
     const html = document.documentElement;
     const body = document.body;
@@ -109,11 +111,13 @@ export function CropEditor({
     const prevBodyTouch = body.style.touchAction;
     const prevOverflow = body.style.overflow;
     const prevOverscroll = body.style.overscrollBehavior;
+    const prevBodyPointer = body.style.pointerEvents;
 
     html.style.touchAction = "none";
     body.style.touchAction = "none";
     body.style.overflow = "hidden";
     body.style.overscrollBehavior = "none";
+    body.style.pointerEvents = "auto";
 
     const viewport = document.querySelector('meta[name="viewport"]');
     const prevViewport = viewport?.getAttribute("content") ?? null;
@@ -151,6 +155,7 @@ export function CropEditor({
       body.style.touchAction = prevBodyTouch;
       body.style.overflow = prevOverflow;
       body.style.overscrollBehavior = prevOverscroll;
+      body.style.pointerEvents = prevBodyPointer;
       if (viewport && prevViewport != null) {
         viewport.setAttribute("content", prevViewport);
       }
@@ -162,9 +167,18 @@ export function CropEditor({
   }, []);
 
   // Also block on the overlay itself (capture) in case document listeners miss.
+  // Keep aria-hidden cleared — Radix hideOthers stamps it on body siblings.
   useEffect(() => {
     const el = overlayRef.current;
     if (!el) return;
+    const unveil = () => {
+      el.removeAttribute("aria-hidden");
+      el.removeAttribute("data-aria-hidden");
+      el.setAttribute("aria-modal", "true");
+    };
+    unveil();
+    const mo = new MutationObserver(unveil);
+    mo.observe(el, { attributes: true, attributeFilter: ["aria-hidden", "data-aria-hidden"] });
     const onTouchMove = (event: TouchEvent) => {
       const target = event.target as HTMLElement | null;
       const onControls = Boolean(
@@ -183,6 +197,7 @@ export function CropEditor({
     el.addEventListener("gesturestart", onGesture, { passive: false } as AddEventListenerOptions);
     el.addEventListener("gesturechange", onGesture, { passive: false } as AddEventListenerOptions);
     return () => {
+      mo.disconnect();
       el.removeEventListener("touchmove", onTouchMove);
       el.removeEventListener("gesturestart", onGesture);
       el.removeEventListener("gesturechange", onGesture);
@@ -362,7 +377,7 @@ export function CropEditor({
     <div
       ref={overlayRef}
       className="fixed inset-0 z-[200] flex flex-col bg-bg"
-      style={{ touchAction: "none" }}
+      style={{ touchAction: "none", pointerEvents: "auto" }}
       role="dialog"
       aria-modal="true"
       aria-labelledby="folio-crop-title"
