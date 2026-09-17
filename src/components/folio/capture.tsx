@@ -1,4 +1,4 @@
-import { Camera, ImagePlus, LoaderCircle, Pin } from "lucide-react";
+import { Camera, Crop, ImagePlus, LoaderCircle, Pin } from "lucide-react";
 import {
   useEffect,
   useMemo,
@@ -19,6 +19,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { CropEditor } from "@/components/folio/crop-editor";
 import { findDuplicates, type DuplicateMatch } from "@/lib/cards/duplicates";
 import { extractCardInfo } from "@/lib/cards/extract";
 import { fileToCompressedDataUrl } from "@/lib/cards/image";
@@ -55,6 +56,11 @@ export function CaptureDialog() {
   const [busy, setBusy] = useState(false);
   const [suggestedLines, setSuggestedLines] = useState<string[]>([...LINE_SUGGESTIONS]);
   const [dupes, setDupes] = useState<DuplicateMatch[]>([]);
+  const [cropSession, setCropSession] = useState<{
+    src: string;
+    side: "front" | "back";
+    mode: "new" | "adjust";
+  } | null>(null);
 
   const cameraRef = useRef<HTMLInputElement>(null);
   const libraryRef = useRef<HTMLInputElement>(null);
@@ -91,6 +97,7 @@ export function CaptureDialog() {
     }
     setDupes([]);
     setBusy(false);
+    setCropSession(null);
     // Only reset when the dialog opens or the target card changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, editingId]);
@@ -117,20 +124,40 @@ export function CaptureDialog() {
     setBusy(true);
     try {
       const { dataUrl, cropped, fitted, cropSkipped } = await fileToCompressedDataUrl(file);
-      if (targetSide.current === "front") setFront(dataUrl);
-      else setBack(dataUrl);
       if (fitted) {
-        toast.message("Fitted card to frame");
+        toast.message("Fitted card to frame — adjust if needed");
       } else if (cropped) {
-        toast.message("Card cropped to fit");
+        toast.message("Card cropped — adjust if needed");
       } else if (cropSkipped) {
-        toast.message("Couldn't isolate the card — saved full photo");
+        toast.message("Couldn't isolate the card — adjust the crop");
       }
+      setCropSession({
+        src: dataUrl,
+        side: targetSide.current,
+        mode: "new",
+      });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not use that photo");
     } finally {
       setBusy(false);
     }
+  };
+
+  const commitCrop = (dataUrl: string) => {
+    if (!cropSession) return;
+    if (cropSession.side === "front") setFront(dataUrl);
+    else setBack(dataUrl);
+    setCropSession(null);
+  };
+
+  const cancelCrop = () => {
+    setCropSession(null);
+  };
+
+  const openAdjustCrop = (side: "front" | "back") => {
+    const src = side === "front" ? front : back;
+    if (!src) return;
+    setCropSession({ src, side, mode: "adjust" });
   };
 
   const readCard = async () => {
@@ -254,7 +281,20 @@ export function CaptureDialog() {
           }}
         />
 
-        {step === "reading" ? (
+        {cropSession ? (
+          <CropEditor
+            src={cropSession.src}
+            title={
+              cropSession.mode === "adjust"
+                ? "Adjust crop"
+                : cropSession.side === "front"
+                  ? "Crop the front"
+                  : "Crop the back"
+            }
+            onConfirm={commitCrop}
+            onCancel={cancelCrop}
+          />
+        ) : step === "reading" ? (
           <ReadingPreview src={front} />
         ) : step === "duplicate" ? (
           <DuplicateChooser
@@ -299,11 +339,19 @@ export function CaptureDialog() {
             <div className="px-6 pb-2">
               <div className="relative overflow-hidden rounded-lg bg-elevated">
                 {preview ? (
-                  <img
-                    src={preview}
-                    alt={side === "front" ? "Front of card" : "Back of card"}
-                    className="folio-aspect w-full object-cover"
-                  />
+                  <button
+                    type="button"
+                    className="block w-full text-left"
+                    onClick={() => openAdjustCrop(side)}
+                    disabled={busy}
+                    aria-label="Adjust crop"
+                  >
+                    <img
+                      src={preview}
+                      alt={side === "front" ? "Front of card" : "Back of card"}
+                      className="folio-aspect w-full object-cover"
+                    />
+                  </button>
                 ) : (
                   <div className="flex folio-aspect flex-col items-center justify-center gap-2 text-muted">
                     <ImagePlus className="size-7" />
@@ -331,6 +379,18 @@ export function CaptureDialog() {
                   Choose photo
                 </Button>
               </div>
+              {preview ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="mt-2 w-full"
+                  onClick={() => openAdjustCrop(side)}
+                  disabled={busy}
+                >
+                  <Crop />
+                  Adjust crop
+                </Button>
+              ) : null}
             </div>
 
             <DialogFooter>
