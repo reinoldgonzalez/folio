@@ -116,9 +116,14 @@ export function CaptureDialog() {
     if (!file) return;
     setBusy(true);
     try {
-      const dataUrl = await fileToCompressedDataUrl(file);
+      const { dataUrl, cropped, cropSkipped } = await fileToCompressedDataUrl(file);
       if (targetSide.current === "front") setFront(dataUrl);
       else setBack(dataUrl);
+      if (cropped) {
+        toast.message("Card cropped to fit");
+      } else if (cropSkipped) {
+        toast.message("Couldn't isolate the card — saved full photo");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not use that photo");
     } finally {
@@ -223,6 +228,8 @@ export function CaptureDialog() {
   return (
     <Dialog open={open} onOpenChange={(next) => !next && closeCapture()}>
       <DialogContent className="p-0">
+        {/* Native camera UI (capture=environment) handles continuous AF where the OS supports it;
+            there is no getUserMedia preview — post-capture crop + clarity are the in-app fixes. */}
         <input
           ref={cameraRef}
           type="file"
@@ -282,7 +289,7 @@ export function CaptureDialog() {
               </DialogTitle>
               <DialogDescription>
                 {side === "front"
-                  ? "Fill the frame with the card. Names and numbers will be read automatically."
+                  ? "Photograph the card on a contrasting surface. Folio crops it to size and sharpens soft shots."
                   : "Optional. The reverse often holds an address or extra lines."}
               </DialogDescription>
             </DialogHeader>
