@@ -1,0 +1,188 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Figtree", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces", "Iowan Old Style", Georgia, serif;
+
+  --color-bg: #121110;
+  --color-surface: #1c1a18;
+  --color-elevated: #262320;
+  --color-fg: #f3eee6;
+  --color-muted: #9a9186;
+  --color-subtle: #6f675e;
+  --color-border: #3a342e;
+  --color-accent: #ebe4d8;
+  --color-accent-fg: #161310;
+  --color-paper: #f4eee4;
+  --color-ink: #1a1612;
+  --color-ink-muted: #6a6258;
+  --color-tab: #e8dfd0;
+  --color-danger: #c45c52;
+  --color-ring: #ebe4d8;
+
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.5rem;
+  --radius-2xl: 2rem;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  img {
+    outline: 1px solid color-mix(in oklab, var(--color-fg) 10%, transparent);
+    outline-offset: -1px;
+  }
+}
+
+:root {
+  --motion-stagger: 40ms;
+  --motion-micro: 80ms;
+  --motion-quick: 150ms;
+  --motion-fast: 250ms;
+  --motion-medium: 350ms;
+  --motion-slow: 400ms;
+  --motion-emphasis: 520ms;
+  --ease-smooth-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+  --shadow-tray:
+    inset 0 1px 0 color-mix(in oklab, var(--color-fg) 8%, transparent),
+    0 24px 60px rgba(0, 0, 0, 0.45);
+  --shadow-card:
+    0 18px 40px rgba(0, 0, 0, 0.42),
+    0 0 0 1px color-mix(in oklab, var(--color-fg) 10%, transparent);
+}
+
+.folio-grain {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.045;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.9'/%3E%3C/svg%3E");
+}
+
+.folio-vignette {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background:
+    radial-gradient(920px 560px at 50% 28%, #1b1714 0%, transparent 72%),
+    var(--color-bg);
+}
+
+.folio-photo-well {
+  min-height: 0;
+}
+
+.folio-stage {
+  overflow: hidden;
+  isolation: isolate;
+  touch-action: none;
+}
+
+.folio-card {
+  width: min(32rem, 92%);
+  max-height: 100%;
+  aspect-ratio: 1.75 / 1;
+}
+
+.folio-slot {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%) translateY(var(--ty, 0px)) scale(var(--sc, 1));
+  transition:
+    transform var(--motion-medium) var(--ease-smooth-out),
+    opacity var(--motion-fast) var(--ease-smooth-out);
+}
+
+.folio-file {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.scan-line {
+  animation: folio-scan 1.6s var(--ease-in-out) infinite;
+}
+
+@keyframes folio-scan {
+  0% {
+    top: 8%;
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    top: 88%;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .folio-slot {
+    transition: opacity var(--motion-quick) linear;
+  }
+
+  .scan-line {
+    animation: none;
+  }
+}
+
+.folio-aspect {
+  aspect-ratio: 1.75 / 1;
+}
+
+.folio-dialog {
+  width: min(28rem, calc(100vw - 1.5rem));
+  max-height: min(92dvh, 46rem);
+}
+
+.folio-header {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
+}
+
+.folio-main {
+  padding-bottom: env(safe-area-inset-bottom);
+}
