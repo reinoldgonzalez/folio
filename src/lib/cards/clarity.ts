@@ -149,9 +149,13 @@ function sourceSize(source: ImageBitmap | HTMLCanvasElement): {
   return { width: source.width, height: source.height };
 }
 
+/** Skip full-res unsharp above this width (RGBA + blur buffers get heavy). */
+const UNSHARP_MAX_WIDTH = 1200;
+
 /**
  * If the photo looks soft, apply a conservative unsharp mask.
  * Crisp images are left untouched. Failures return the input unchanged.
+ * Wide sources (> UNSHARP_MAX_WIDTH) are analyzed only — no full-res unsharp.
  */
 export function enhanceClarity(
   source: ImageBitmap | HTMLCanvasElement,
@@ -162,9 +166,15 @@ export function enhanceClarity(
       return { source, sharpened: false };
     }
 
+    // Always analyze on a tiny downscale; skip full-res unsharp when too wide.
     const sharpness = estimateSharpness(source, width, height);
 
     if (sharpness >= CRISP_THRESHOLD) {
+      return { source, sharpened: false };
+    }
+
+    if (width > UNSHARP_MAX_WIDTH) {
+      // Analyze-only: photo is soft but unsharp on this size risks OOM.
       return { source, sharpened: false };
     }
 

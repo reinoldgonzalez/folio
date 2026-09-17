@@ -1002,11 +1002,31 @@ function sampleBilinear(
   return [r, g, b];
 }
 
-/** Convenience: returns a canvas that drawImage accepts. */
-export function warpCardToCanvas(
-  bitmap: ImageBitmap,
-  quad: Quad,
-): HTMLCanvasElement | null {
+/** Cap warped output longest side — keeps RGBA buffers phone-safe. */
+const WARP_OUT_MAX = 1000;
+/** Never sample perspective warp from a canvas larger than this. */
+const WARP_SRC_MAX = 1600;
+
+function releaseCanvas(canvas: HTMLCanvasElement) {
+  try {
+    canvas.width = 0;
+    canvas.height = 0;
+  } catch {
+    // ignore
+  }
+}
+
+function isAxisAligned(q: Quad, tol = 2.5): boolean {
+  const nearly = (a: number, b: number) => Math.abs(a - b) <= tol;
+  return (
+    nearly(q[0].y, q[1].y) &&
+    nearly(q[3].y, q[2].y) &&
+    nearly(q[0].x, q[3].x) &&
+    nearly(q[1].x, q[2].x)
+  );
+}
+
+function outputSizeForQuad(quad: Quad): { outW: number; outH: number } {
   const [tl, tr, br, bl] = quad;
   const top = dist(tl, tr);
   const bottom = dist(bl, br);
@@ -1016,17 +1036,68 @@ export function warpCardToCanvas(
   const avgH = (left + right) / 2;
   const landscape = avgW >= avgH;
   const longSide = Math.max(avgW, avgH);
-  const outLong = clamp(Math.round(longSide), 640, 1400);
+  const outLong = clamp(Math.round(longSide), 640, WARP_OUT_MAX);
   const outW = landscape ? outLong : Math.round(outLong / CARD_ASPECT);
   const outH = landscape ? Math.round(outLong / CARD_ASPECT) : outLong;
+  return { outW, outH };
+}
+
+/** Cheap axis-aligned crop via drawImage — no getImageData. */
+function warpAxisAligned(
+  bitmap: ImageBitmap,
+  quad: Quad,
+  outW: number,
+  outH: number,
+): HTMLCanvasElement | null {
+  const minX = Math.min(quad[0].x, quad[1].x, quad[2].x, quad[3].x);
+  const maxX = Math.max(quad[0].x, quad[1].x, quad[2].x, quad[3].x);
+  const minY = Math.min(quad[0].y, quad[1].y, quad[2].y, quad[3].y);
+  const maxY = Math.max(quad[0].y, quad[1].y, quad[2].y, quad[3].y);
+  const sw = maxX - minX;
+  const sh = maxY - minY;
+  if (sw < 4 || sh < 4) return null;
+
+  const out = document.createElement("canvas");
+  out.width = outW;
+  out.height = outH;
+  const ctx = out.getContext("2d");
+  if (!ctx) return null;
+  ctx.fillStyle = "#f4eee4";
+  ctx.fillRect(0, 0, outW, outH);
+  ctx.drawImage(bitmap, minX, minY, sw, sh, 0, 0, outW, outH);
+  return out;
+}
+
+/**
+ * Perspective warp sampling only from an already-downscaled source canvas.
+ * Never getImageData at native camera resolution.
+ */
+function warpPerspective(
+  bitmap: ImageBitmap,
+  quad: Quad,
+  outW: number,
+  outH: number,
+): HTMLCanvasElement | null {
+  const srcScale = Math.min(
+    1,
+    WARP_SRC_MAX / Math.max(bitmap.width, bitmap.height),
+  );
+  const srcW = Math.max(1, Math.round(bitmap.width * srcScale));
+  const srcH = Math.max(1, Math.round(bitmap.height * srcScale));
 
   const srcCanvas = document.createElement("canvas");
-  srcCanvas.width = bitmap.width;
-  srcCanvas.height = bitmap.height;
+  srcCanvas.width = srcW;
+  srcCanvas.height = srcH;
   const sctx = srcCanvas.getContext("2d", { willReadFrequently: true });
   if (!sctx) return null;
-  sctx.drawImage(bitmap, 0, 0);
-  const srcData = sctx.getImageData(0, 0, bitmap.width, bitmap.height);
+  sctx.drawImage(bitmap, 0, 0, srcW, srcH);
+  const srcData = sctx.getImageData(0, 0, srcW, srcH);
+  // Free GPU/backing store; pixels live in srcData now
+  releaseCanvas(srcCanvas);
+
+  const scaledQuad: Quad = orderQuad(
+    quad.map((p) => ({ x: p.x * srcScale, y: p.y * srcScale })),
+  );
 
   const dst: Quad = [
     { x: 0, y: 0 },
@@ -1035,7 +1106,7 @@ export function warpCardToCanvas(
     { x: 0, y: outH - 1 },
   ];
 
-  const H = getPerspectiveTransform(quad, dst);
+  const H = getPerspectiveTransform(scaledQuad, dst);
   const inv = invertHomography(H);
   if (!inv) return null;
 
@@ -1052,13 +1123,7 @@ export function warpCardToCanvas(
       const denom = inv[6] * x + inv[7] * y + 1;
       const sx = (inv[0] * x + inv[1] * y + inv[2]) / denom;
       const sy = (inv[3] * x + inv[4] * y + inv[5]) / denom;
-      const [r, g, b] = sampleBilinear(
-        srcData.data,
-        bitmap.width,
-        bitmap.height,
-        sx,
-        sy,
-      );
+      const [r, g, b] = sampleBilinear(srcData.data, srcW, srcH, sx, sy);
       const i = (y * outW + x) * 4;
       od[i] = r;
       od[i + 1] = g;
@@ -1068,6 +1133,35 @@ export function warpCardToCanvas(
   }
   octx.putImageData(outImg, 0, 0);
   return out;
+}
+
+/** Convenience: returns a canvas that drawImage accepts. */
+export function warpCardToCanvas(
+  bitmap: ImageBitmap,
+  quad: Quad,
+): HTMLCanvasElement | null {
+  const { outW, outH } = outputSizeForQuad(quad);
+
+  // Prefer drawImage for axis-aligned quads (center-fit / bounds) — no ImageData.
+  if (isAxisAligned(quad)) {
+    try {
+      const simple = warpAxisAligned(bitmap, quad, outW, outH);
+      if (simple) return simple;
+    } catch {
+      // fall through to perspective / fail
+    }
+  }
+
+  try {
+    return warpPerspective(bitmap, quad, outW, outH);
+  } catch {
+    // OOM mid-warp: try a cheap axis-aligned bbox draw as last resort
+    try {
+      return warpAxisAligned(bitmap, quad, outW, outH);
+    } catch {
+      return null;
+    }
+  }
 }
 
 export type CropAttempt = {
@@ -1081,10 +1175,31 @@ export type CropAttempt = {
   skipped: boolean;
 };
 
+/** Simple downscale of the working bitmap when warp/crop OOM. */
+function simpleDownscaleCanvas(
+  bitmap: ImageBitmap,
+  maxSide = WARP_OUT_MAX,
+): HTMLCanvasElement | null {
+  try {
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    return canvas;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Detect the card, perspective-correct, and fit to ~3.5×2.
  * Falls back to bbox fit, then center card-aspect crop — almost never leaves
- * the full uncropped photo.
+ * the full uncropped photo. On OOM, prefers a cheap downscale over crashing.
  */
 export async function cropBusinessCard(bitmap: ImageBitmap): Promise<CropAttempt> {
   try {
@@ -1094,27 +1209,41 @@ export async function cropBusinessCard(bitmap: ImageBitmap): Promise<CropAttempt
       const full: Quad = orderQuad(
         quad.map((p) => ({ x: p.x / scale, y: p.y / scale })),
       );
-      const warped = warpCardToCanvas(bitmap, full);
-      if (warped) {
-        return {
-          source: warped,
-          cropped: true,
-          fitted: false,
-          skipped: false,
-        };
+      try {
+        const warped = warpCardToCanvas(bitmap, full);
+        if (warped) {
+          return {
+            source: warped,
+            cropped: true,
+            fitted: false,
+            skipped: false,
+          };
+        }
+      } catch {
+        // warp OOM — try center fit below
       }
     }
 
     // Fallback B: center card-aspect crop → warp/fit to 3.5×2 output
-    const center = centerCardAspectQuad(bitmap.width, bitmap.height, 0.06);
-    const fittedCanvas = warpCardToCanvas(bitmap, center);
-    if (fittedCanvas) {
-      return {
-        source: fittedCanvas,
-        cropped: true,
-        fitted: true,
-        skipped: false,
-      };
+    try {
+      const center = centerCardAspectQuad(bitmap.width, bitmap.height, 0.06);
+      const fittedCanvas = warpCardToCanvas(bitmap, center);
+      if (fittedCanvas) {
+        return {
+          source: fittedCanvas,
+          cropped: true,
+          fitted: true,
+          skipped: false,
+        };
+      }
+    } catch {
+      // fall through
+    }
+
+    // Fallback C: cheap downscale so encode still succeeds
+    const down = simpleDownscaleCanvas(bitmap);
+    if (down) {
+      return { source: down, cropped: false, fitted: false, skipped: true };
     }
 
     return { source: bitmap, cropped: false, fitted: false, skipped: true };
@@ -1132,6 +1261,10 @@ export async function cropBusinessCard(bitmap: ImageBitmap): Promise<CropAttempt
       }
     } catch {
       // ignore
+    }
+    const down = simpleDownscaleCanvas(bitmap);
+    if (down) {
+      return { source: down, cropped: false, fitted: false, skipped: true };
     }
     return { source: bitmap, cropped: false, fitted: false, skipped: true };
   }
