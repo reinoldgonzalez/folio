@@ -290,13 +290,13 @@ export function RolodexWheel({
                     <button
                       type="button"
                       onClick={() => onActiveId(card.id)}
-                      className="folio-card overflow-hidden rounded-md shadow-[var(--shadow-card)]"
+                      className="folio-card relative overflow-hidden rounded-md shadow-[var(--shadow-card)]"
                       aria-label={`Open ${card.company}`}
                     >
                       <img
                         src={card.frontImage}
                         alt=""
-                        className="h-full w-full object-cover"
+                        className="absolute inset-0 h-full w-full object-cover"
                         draggable={false}
                       />
                     </button>

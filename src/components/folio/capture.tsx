@@ -65,6 +65,8 @@ export function CaptureDialog() {
   const cameraRef = useRef<HTMLInputElement>(null);
   const libraryRef = useRef<HTMLInputElement>(null);
   const targetSide = useRef<"front" | "back">("front");
+  /** True while native camera/file picker is open — ignore Dialog dismiss. */
+  const pickingRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -116,11 +118,27 @@ export function CaptureDialog() {
   const pick = (side: "front" | "back", mode: "camera" | "library") => {
     targetSide.current = side;
     const input = mode === "camera" ? cameraRef.current : libraryRef.current;
-    input?.click();
+    if (!input) return;
+    // Opening the native picker blurs the dialog on many phones and fires
+    // onOpenChange(false). Hold the dialog open until the pick settles.
+    pickingRef.current = true;
+    const clearPicking = () => {
+      window.setTimeout(() => {
+        pickingRef.current = false;
+      }, 600);
+      window.removeEventListener("focus", clearPicking);
+    };
+    window.addEventListener("focus", clearPicking, { once: true });
+    input.click();
   };
 
   const onFile = async (file: File | undefined) => {
-    if (!file) return;
+    if (!file) {
+      pickingRef.current = false;
+      return;
+    }
+    // Keep ignore-dismiss until cropSession is set (or failure).
+    pickingRef.current = true;
     setBusy(true);
     try {
       const { dataUrl, cropped, fitted, cropSkipped } = await fileToCompressedDataUrl(file);
@@ -139,6 +157,7 @@ export function CaptureDialog() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not use that photo");
     } finally {
+      pickingRef.current = false;
       setBusy(false);
     }
   };
@@ -255,8 +274,29 @@ export function CaptureDialog() {
   const preview = step === "back" ? back : front;
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && closeCapture()}>
-      <DialogContent className="p-0">
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // Never dismiss while the native picker is open or crop UI is active —
+        // otherwise cropSession is cleared before CropEditor can appear.
+        if (!next) {
+          if (pickingRef.current || cropSession) return;
+          closeCapture();
+        }
+      }}
+    >
+      <DialogContent className="p-0" onPointerDownOutside={(e) => {
+        if (pickingRef.current || cropSession) e.preventDefault();
+      }} onInteractOutside={(e) => {
+        if (pickingRef.current || cropSession) e.preventDefault();
+      }} onEscapeKeyDown={(e) => {
+        if (cropSession) {
+          e.preventDefault();
+          cancelCrop();
+        } else if (pickingRef.current) {
+          e.preventDefault();
+        }
+      }}>
         {/* Native camera UI (capture=environment) handles continuous AF where the OS supports it;
             there is no getUserMedia preview — post-capture crop + clarity are the in-app fixes. */}
         <input
@@ -287,9 +327,7 @@ export function CaptureDialog() {
             title={
               cropSession.mode === "adjust"
                 ? "Adjust crop"
-                : cropSession.side === "front"
-                  ? "Crop the front"
-                  : "Crop the back"
+                : "Crop your photo"
             }
             onConfirm={commitCrop}
             onCancel={cancelCrop}

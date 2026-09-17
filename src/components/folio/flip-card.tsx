@@ -47,7 +47,7 @@ export function FlipCard({ card, face, onCycle }: FlipCardProps) {
           <img
             src={card.backImage}
             alt={`${card.company} business card, back`}
-            className="h-full w-full object-cover"
+            className="absolute inset-0 h-full w-full object-cover"
             draggable={false}
           />
         ) : (
@@ -57,7 +57,7 @@ export function FlipCard({ card, face, onCycle }: FlipCardProps) {
         <img
           src={card.frontImage}
           alt={`${card.company} business card, front`}
-          className="h-full w-full object-cover"
+          className="absolute inset-0 h-full w-full object-cover"
           draggable={false}
         />
       )}

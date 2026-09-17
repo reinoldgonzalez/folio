@@ -6,14 +6,9 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { LoaderCircle, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { CARD_ASPECT } from "@/lib/cards/crop";
 import { applyPanZoomCrop } from "@/lib/cards/image-crop";
 import { cn } from "@/lib/utils";
@@ -58,7 +53,7 @@ function clampPan(
 
 export function CropEditor({
   src,
-  title = "Adjust crop",
+  title = "Crop your photo",
   onConfirm,
   onCancel,
 }: CropEditorProps) {
@@ -97,6 +92,15 @@ export function CropEditor({
     img.onerror = () => setNatural(null);
     img.src = src;
   }, [src]);
+
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
 
   useEffect(() => {
     const el = frameRef.current;
@@ -263,22 +267,32 @@ export function CropEditor({
   const left = (frame.w - displayW) / 2 + panX;
   const top = (frame.h - displayH) / 2 + panY;
 
-  return (
-    <>
-      <DialogHeader>
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>
+  const overlay = (
+    <div
+      className="fixed inset-0 z-[200] flex flex-col bg-bg"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="folio-crop-title"
+    >
+      <header className="shrink-0 px-5 pb-2 pt-[max(1rem,env(safe-area-inset-top))]">
+        <h2
+          id="folio-crop-title"
+          className="font-display text-2xl font-medium tracking-tight text-fg"
+        >
+          {title}
+        </h2>
+        <p className="mt-1 text-sm text-muted">
           Drag to reposition. Pinch or use the buttons to zoom. The frame matches a
           business card (3.5 × 2).
-        </DialogDescription>
-      </DialogHeader>
+        </p>
+      </header>
 
-      <div className="px-6 pb-2">
+      <div className="flex min-h-0 flex-1 flex-col justify-center px-4">
         <div
           ref={frameRef}
           className={cn(
-            "relative touch-none select-none overflow-hidden rounded-lg bg-elevated",
-            "folio-aspect w-full cursor-grab active:cursor-grabbing",
+            "relative mx-auto touch-none select-none overflow-hidden rounded-lg bg-elevated",
+            "folio-aspect w-full max-w-lg cursor-grab active:cursor-grabbing",
           )}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -307,7 +321,7 @@ export function CropEditor({
           <div className="pointer-events-none absolute inset-0 rounded-lg ring-1 ring-inset ring-fg/20" />
         </div>
 
-        <div className="mt-3 flex items-center justify-center gap-2">
+        <div className="mt-4 flex items-center justify-center gap-2">
           <Button
             type="button"
             variant="outline"
@@ -341,7 +355,7 @@ export function CropEditor({
         </div>
       </div>
 
-      <DialogFooter>
+      <footer className="flex shrink-0 flex-col-reverse gap-2 px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:flex-row sm:justify-end">
         <Button type="button" variant="ghost" onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
@@ -349,7 +363,10 @@ export function CropEditor({
           {busy ? <LoaderCircle className="animate-spin" /> : null}
           Use crop
         </Button>
-      </DialogFooter>
-    </>
+      </footer>
+    </div>
   );
+
+  if (typeof document === "undefined") return null;
+  return createPortal(overlay, document.body);
 }
