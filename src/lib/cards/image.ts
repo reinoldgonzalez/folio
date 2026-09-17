@@ -37,9 +37,11 @@ export type CompressedPhoto = {
   dataUrl: string;
   /** True when the card region was isolated and perspective-corrected. */
   cropped: boolean;
+  /** True when we used a centered card-aspect fit (no strong quad). */
+  fitted: boolean;
   /** True when a soft-shot clarity pass was applied. */
   sharpened: boolean;
-  /** True when crop detection was weak and we kept the full frame. */
+  /** True when crop failed and we kept the unchanged full frame. */
   cropSkipped: boolean;
 };
 
@@ -81,6 +83,7 @@ export async function fileToCompressedDataUrl(file: File): Promise<CompressedPho
   }
 
   let cropped = false;
+  let fitted = false;
   let cropSkipped = false;
   let sharpened = false;
   let working: ImageBitmap | HTMLCanvasElement = bitmap;
@@ -89,6 +92,7 @@ export async function fileToCompressedDataUrl(file: File): Promise<CompressedPho
     const crop = await cropBusinessCard(bitmap);
     working = crop.source;
     cropped = crop.cropped;
+    fitted = crop.fitted;
     cropSkipped = crop.skipped;
   } catch {
     working = bitmap;
@@ -105,7 +109,7 @@ export async function fileToCompressedDataUrl(file: File): Promise<CompressedPho
 
   try {
     const dataUrl = await compressImage(working);
-    return { dataUrl, cropped, sharpened, cropSkipped };
+    return { dataUrl, cropped, fitted, sharpened, cropSkipped };
   } finally {
     bitmap.close();
   }

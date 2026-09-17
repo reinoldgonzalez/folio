@@ -7,9 +7,10 @@ export type Quad = [Point, Point, Point, Point]; // TL, TR, BR, BL
 export const CARD_ASPECT = 3.5 / 2;
 
 const ANALYZE_MAX = 420;
-const MIN_AREA_RATIO = 0.1;
-const MAX_AREA_RATIO = 0.92;
-const MIN_SCORE = 0.42;
+const MIN_AREA_RATIO = 0.06;
+const MAX_AREA_RATIO = 0.95;
+/** Accept imperfect quads that still beat a full-frame keep. */
+const WEAK_SCORE = 0.18;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -30,7 +31,6 @@ export function orderQuad(pts: Point[]): Quad {
 }
 
 function quadArea(q: Quad): number {
-  // Shoelace
   let a = 0;
   for (let i = 0; i < 4; i++) {
     const j = (i + 1) % 4;
@@ -55,37 +55,35 @@ function scoreQuad(q: Quad, imgW: number, imgH: number): number {
   if (avgW < 8 || avgH < 8) return 0;
 
   const aspect = Math.max(avgW, avgH) / Math.min(avgW, avgH);
-  // Prefer ~1.75 (or portrait inverse)
   const aspectErr = Math.min(
     Math.abs(aspect - CARD_ASPECT) / CARD_ASPECT,
     Math.abs(aspect - 1 / CARD_ASPECT) / (1 / CARD_ASPECT),
-    Math.abs(aspect - 1.4) / 1.4, // tolerate slightly square-ish cards
+    Math.abs(aspect - 1.4) / 1.4,
+    Math.abs(aspect - 1.6) / 1.6,
   );
-  const aspectScore = clamp(1 - aspectErr * 1.4, 0, 1);
+  const aspectScore = clamp(1 - aspectErr * 1.15, 0, 1);
 
-  // Parallelism / rectangularity: opposite sides similar length
   const oppW = 1 - Math.abs(top - bottom) / Math.max(top, bottom, 1);
   const oppH = 1 - Math.abs(left - right) / Math.max(left, right, 1);
   const rectScore = (oppW + oppH) / 2;
 
-  // Prefer somewhat central cards
   const cx = (q[0].x + q[1].x + q[2].x + q[3].x) / 4;
   const cy = (q[0].y + q[1].y + q[2].y + q[3].y) / 4;
   const centerDist =
     Math.hypot(cx - imgW / 2, cy - imgH / 2) / Math.hypot(imgW / 2, imgH / 2);
-  const centerScore = clamp(1 - centerDist * 0.7, 0, 1);
+  const centerScore = clamp(1 - centerDist * 0.55, 0, 1);
 
-  // Area sweet spot ~25–70%
+  // Prefer mid-size crops; still reward large-ish cards that aren't full-bleed
   const areaScore =
-    areaRatio < 0.25
-      ? areaRatio / 0.25
-      : areaRatio > 0.75
-        ? clamp((0.95 - areaRatio) / 0.2, 0, 1)
+    areaRatio < 0.18
+      ? areaRatio / 0.18
+      : areaRatio > 0.82
+        ? clamp((0.98 - areaRatio) / 0.16, 0, 1)
         : 1;
 
   return (
-    0.32 * aspectScore +
-    0.28 * rectScore +
+    0.34 * aspectScore +
+    0.26 * rectScore +
     0.22 * areaScore +
     0.18 * centerScore
   );
@@ -119,7 +117,6 @@ function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Arr
   if (r <= 0) return src.slice();
   const tmp = new Float32Array(src.length);
   const out = new Float32Array(src.length);
-  // Horizontal
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let sum = 0;
@@ -132,7 +129,6 @@ function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Arr
       tmp[y * w + x] = sum / count;
     }
   }
-  // Vertical
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let sum = 0;
@@ -173,7 +169,66 @@ function sobelMag(gray: Float32Array, w: number, h: number): Float32Array {
   return mag;
 }
 
-/** Sample mean luminance of a corner patch (background estimate). */
+type Rgb = { r: number; g: number; b: number };
+
+function sampleBorderColors(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+): Rgb {
+  const step = Math.max(1, Math.floor(Math.min(w, h) / 40));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  const add = (x: number, y: number) => {
+    const i = (y * w + x) * 4;
+    r += data[i];
+    g += data[i + 1];
+    b += data[i + 2];
+    n++;
+  };
+  for (let x = 0; x < w; x += step) {
+    add(x, 0);
+    add(x, h - 1);
+  }
+  for (let y = 0; y < h; y += step) {
+    add(0, y);
+    add(w - 1, y);
+  }
+  // Prefer corner patches when border is contaminated by the card
+  const pw = Math.max(2, Math.floor(w * 0.06));
+  const ph = Math.max(2, Math.floor(h * 0.06));
+  const corners: Array<[number, number]> = [
+    [0, 0],
+    [w - pw, 0],
+    [0, h - ph],
+    [w - pw, h - ph],
+  ];
+  let cr = 0;
+  let cg = 0;
+  let cb = 0;
+  let cn = 0;
+  for (const [ox, oy] of corners) {
+    for (let y = oy; y < oy + ph; y += step) {
+      for (let x = ox; x < ox + pw; x += step) {
+        const i = (y * w + x) * 4;
+        cr += data[i];
+        cg += data[i + 1];
+        cb += data[i + 2];
+        cn++;
+      }
+    }
+  }
+  // Blend: corners weigh more (desk corners usually background)
+  const tw = n + cn * 2;
+  return {
+    r: (r + cr * 2) / tw,
+    g: (g + cg * 2) / tw,
+    b: (b + cb * 2) / tw,
+  };
+}
+
 function cornerMean(gray: Float32Array, w: number, h: number): number {
   const pw = Math.max(2, Math.floor(w * 0.08));
   const ph = Math.max(2, Math.floor(h * 0.08));
@@ -196,63 +251,107 @@ function cornerMean(gray: Float32Array, w: number, h: number): number {
   return sum / Math.max(1, n);
 }
 
-/**
- * Build a foreground mask: pixels far from border background OR on strong edges,
- * then keep the largest interior blob via flood-fill of background from borders.
- */
-function buildCardMask(
-  gray: Float32Array,
-  edges: Float32Array,
-  w: number,
-  h: number,
-): Uint8Array {
-  const bg = cornerMean(gray, w, h);
-  // Adaptive threshold from variance of corner vs whole
+function grayStats(gray: Float32Array): { mean: number; std: number } {
   let sum = 0;
   let sum2 = 0;
-  const n = w * h;
+  const n = gray.length;
   for (let i = 0; i < n; i++) {
     sum += gray[i];
     sum2 += gray[i] * gray[i];
   }
   const mean = sum / n;
   const std = Math.sqrt(Math.max(0, sum2 / n - mean * mean));
-  const colorThresh = Math.max(18, Math.min(48, std * 0.55));
+  return { mean, std };
+}
 
-  let edgeMax = 0;
-  for (let i = 0; i < n; i++) if (edges[i] > edgeMax) edgeMax = edges[i];
-  const edgeThresh = edgeMax * 0.18;
-
-  const fg = new Uint8Array(n);
-  for (let i = 0; i < n; i++) {
-    const colorDiff = Math.abs(gray[i] - bg);
-    if (colorDiff > colorThresh || edges[i] > edgeThresh) fg[i] = 1;
+/** Otsu threshold on downsampled histogram. */
+function otsuThreshold(gray: Float32Array): number {
+  const hist = new Float32Array(256);
+  for (let i = 0; i < gray.length; i++) {
+    hist[clamp(Math.round(gray[i]), 0, 255)]++;
   }
+  const total = gray.length;
+  let sumAll = 0;
+  for (let i = 0; i < 256; i++) sumAll += i * hist[i];
+  let sumB = 0;
+  let wB = 0;
+  let best = 0;
+  let bestVar = -1;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sumAll - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > bestVar) {
+      bestVar = between;
+      best = t;
+    }
+  }
+  return best;
+}
 
-  // Dilate lightly to close gaps
-  const dil = new Uint8Array(n);
+function dilate(src: Uint8Array, w: number, h: number, passes = 1): Uint8Array {
+  let cur = src;
+  for (let p = 0; p < passes; p++) {
+    const out = new Uint8Array(cur.length);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        if (
+          cur[i] ||
+          cur[i - 1] ||
+          cur[i + 1] ||
+          cur[i - w] ||
+          cur[i + w]
+        ) {
+          out[i] = 1;
+        }
+      }
+    }
+    cur = out;
+  }
+  return cur;
+}
+
+function erode(src: Uint8Array, w: number, h: number): Uint8Array {
+  const out = new Uint8Array(src.length);
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
       if (
-        fg[i] ||
-        fg[i - 1] ||
-        fg[i + 1] ||
-        fg[i - w] ||
-        fg[i + w]
+        src[i] &&
+        src[i - 1] &&
+        src[i + 1] &&
+        src[i - w] &&
+        src[i + w]
       ) {
-        dil[i] = 1;
+        out[i] = 1;
       }
     }
   }
+  return out;
+}
 
-  // Flood-fill background from image border through non-foreground
-  const bgMask = new Uint8Array(n); // 1 = background
+/**
+ * Flood-fill background from image border through non-foreground pixels.
+ * Returns card candidate mask (1 = foreground / not reachable background).
+ */
+function borderFloodCard(
+  fg: Uint8Array,
+  w: number,
+  h: number,
+): Uint8Array {
+  const n = w * h;
+  const bgMask = new Uint8Array(n);
   const stack: number[] = [];
   const push = (x: number, y: number) => {
     if (x < 0 || y < 0 || x >= w || y >= h) return;
     const i = y * w + x;
-    if (bgMask[i] || dil[i]) return;
+    if (bgMask[i] || fg[i]) return;
     bgMask[i] = 1;
     stack.push(i);
   };
@@ -273,14 +372,242 @@ function buildCardMask(
     push(x, y - 1);
     push(x, y + 1);
   }
-
-  // Card candidate = not background
   const card = new Uint8Array(n);
   for (let i = 0; i < n; i++) card[i] = bgMask[i] ? 0 : 1;
   return card;
 }
 
-/** Extreme-point corners of a binary blob (classic document scanner heuristic). */
+/** Keep only the largest 4-connected component in a binary mask. */
+function largestComponent(mask: Uint8Array, w: number, h: number): Uint8Array {
+  const n = w * h;
+  const seen = new Uint8Array(n);
+  const out = new Uint8Array(n);
+  let bestStart = -1;
+  let bestSize = 0;
+  const stack: number[] = [];
+
+  for (let i = 0; i < n; i++) {
+    if (!mask[i] || seen[i]) continue;
+    stack.length = 0;
+    stack.push(i);
+    seen[i] = 1;
+    let size = 0;
+    const start = i;
+    while (stack.length) {
+      const cur = stack.pop()!;
+      size++;
+      const x = cur % w;
+      const y = (cur / w) | 0;
+      const nbrs = [cur - 1, cur + 1, cur - w, cur + w];
+      for (const nb of nbrs) {
+        if (nb < 0 || nb >= n) continue;
+        const nx = nb % w;
+        const ny = (nb / w) | 0;
+        if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+        if (!mask[nb] || seen[nb]) continue;
+        seen[nb] = 1;
+        stack.push(nb);
+      }
+    }
+    if (size > bestSize) {
+      bestSize = size;
+      bestStart = start;
+    }
+  }
+
+  if (bestStart < 0 || bestSize < n * MIN_AREA_RATIO * 0.5) return out;
+
+  // Refill best component
+  stack.length = 0;
+  stack.push(bestStart);
+  out[bestStart] = 1;
+  const filled = new Uint8Array(n);
+  filled[bestStart] = 1;
+  while (stack.length) {
+    const cur = stack.pop()!;
+    const x = cur % w;
+    const y = (cur / w) | 0;
+    const nbrs = [cur - 1, cur + 1, cur - w, cur + w];
+    for (const nb of nbrs) {
+      if (nb < 0 || nb >= n) continue;
+      const nx = nb % w;
+      const ny = (nb / w) | 0;
+      if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) continue;
+      if (!mask[nb] || filled[nb]) continue;
+      filled[nb] = 1;
+      out[nb] = 1;
+      stack.push(nb);
+    }
+  }
+  return out;
+}
+
+function maskFromColorDiff(
+  gray: Float32Array,
+  edges: Float32Array,
+  w: number,
+  h: number,
+  colorThresh: number,
+  edgeFrac: number,
+): Uint8Array {
+  const bg = cornerMean(gray, w, h);
+  const n = w * h;
+  let edgeMax = 0;
+  for (let i = 0; i < n; i++) if (edges[i] > edgeMax) edgeMax = edges[i];
+  const edgeThresh = edgeMax * edgeFrac;
+  const fg = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (Math.abs(gray[i] - bg) > colorThresh || edges[i] > edgeThresh) fg[i] = 1;
+  }
+  return borderFloodCard(dilate(fg, w, h, 1), w, h);
+}
+
+function maskFromRgbDistance(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  thresh: number,
+): Uint8Array {
+  const bg = sampleBorderColors(data, w, h);
+  const n = w * h;
+  const fg = new Uint8Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const dr = data[p] - bg.r;
+    const dg = data[p + 1] - bg.g;
+    const db = data[p + 2] - bg.b;
+    if (Math.hypot(dr, dg, db) > thresh) fg[i] = 1;
+  }
+  return borderFloodCard(dilate(fg, w, h, 1), w, h);
+}
+
+function maskFromOtsu(
+  gray: Float32Array,
+  w: number,
+  h: number,
+  preferBright: boolean,
+): Uint8Array {
+  const t = otsuThreshold(gray);
+  const n = w * h;
+  const fg = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    fg[i] = preferBright ? (gray[i] >= t ? 1 : 0) : gray[i] < t ? 1 : 0;
+  }
+  // Cards rarely touch every border; flood from border through non-fg
+  const card = borderFloodCard(dilate(fg, w, h, 1), w, h);
+  // If flood left almost everything, fall back to largest component of raw fg
+  let count = 0;
+  for (let i = 0; i < n; i++) if (card[i]) count++;
+  if (count > n * 0.92 || count < n * MIN_AREA_RATIO) {
+    return largestComponent(erode(dilate(fg, w, h, 2), w, h), w, h);
+  }
+  return largestComponent(card, w, h);
+}
+
+function maskFromEdges(
+  edges: Float32Array,
+  w: number,
+  h: number,
+  edgeFrac: number,
+): Uint8Array {
+  const n = w * h;
+  let edgeMax = 0;
+  for (let i = 0; i < n; i++) if (edges[i] > edgeMax) edgeMax = edges[i];
+  const thresh = Math.max(12, edgeMax * edgeFrac);
+  const fg = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (edges[i] > thresh) fg[i] = 1;
+  // Close edge gaps then flood exterior
+  const closed = dilate(fg, w, h, 2);
+  return borderFloodCard(closed, w, h);
+}
+
+/**
+ * Bright / high-contrast axis-aligned rectangle via integral-image-ish scan
+ * of local difference from border mean — find best window near card aspect.
+ */
+function brightRectQuad(
+  gray: Float32Array,
+  w: number,
+  h: number,
+): Quad | null {
+  const bg = cornerMean(gray, w, h);
+  // Downsample grid for speed
+  const step = Math.max(2, Math.floor(Math.min(w, h) / 60));
+  const gw = Math.ceil(w / step);
+  const gh = Math.ceil(h / step);
+  const cell = new Float32Array(gw * gh);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      const x0 = gx * step;
+      const y0 = gy * step;
+      const x1 = Math.min(w, x0 + step);
+      const y1 = Math.min(h, y0 + step);
+      let sum = 0;
+      let n = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          sum += Math.abs(gray[y * w + x] - bg);
+          n++;
+        }
+      }
+      cell[gy * gw + gx] = sum / Math.max(1, n);
+    }
+  }
+
+  // Integral image
+  const integ = new Float32Array((gw + 1) * (gh + 1));
+  for (let y = 1; y <= gh; y++) {
+    let row = 0;
+    for (let x = 1; x <= gw; x++) {
+      row += cell[(y - 1) * gw + (x - 1)];
+      integ[y * (gw + 1) + x] = integ[(y - 1) * (gw + 1) + x] + row;
+    }
+  }
+  const rectSum = (x0: number, y0: number, x1: number, y1: number) => {
+    // inclusive grid cells [x0,x1) [y0,y1)
+    return (
+      integ[y1 * (gw + 1) + x1] -
+      integ[y0 * (gw + 1) + x1] -
+      integ[y1 * (gw + 1) + x0] +
+      integ[y0 * (gw + 1) + x0]
+    );
+  };
+
+  let bestScore = 0;
+  let best: Quad | null = null;
+  const aspects = [CARD_ASPECT, 1 / CARD_ASPECT, 1.5, 1 / 1.5];
+
+  for (const aspect of aspects) {
+    for (let hh = Math.max(4, Math.floor(gh * 0.25)); hh <= Math.floor(gh * 0.9); hh++) {
+      const ww = Math.round(hh * aspect);
+      if (ww < 4 || ww > gw) continue;
+      for (let y0 = 0; y0 + hh <= gh; y0++) {
+        for (let x0 = 0; x0 + ww <= gw; x0++) {
+          const area = ww * hh;
+          const mean = rectSum(x0, y0, x0 + ww, y0 + hh) / area;
+          // Prefer contrasty interiors that aren't tiny
+          const areaFrac = area / (gw * gh);
+          const s = mean * (0.6 + 0.4 * clamp(areaFrac / 0.35, 0, 1));
+          if (s > bestScore) {
+            bestScore = s;
+            const minX = x0 * step;
+            const minY = y0 * step;
+            const maxX = Math.min(w - 1, (x0 + ww) * step - 1);
+            const maxY = Math.min(h - 1, (y0 + hh) * step - 1);
+            best = [
+              { x: minX, y: minY },
+              { x: maxX, y: minY },
+              { x: maxX, y: maxY },
+              { x: minX, y: maxY },
+            ];
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+
+/** Extreme-point corners of a binary blob. */
 function blobToQuad(mask: Uint8Array, w: number, h: number): Quad | null {
   let minSum = Infinity;
   let maxSum = -Infinity;
@@ -317,18 +644,15 @@ function blobToQuad(mask: Uint8Array, w: number, h: number): Quad | null {
     }
   }
 
-  if (!tl || !tr || !br || !bl || count < (w * h) * MIN_AREA_RATIO) return null;
+  if (!tl || !tr || !br || !bl || count < w * h * MIN_AREA_RATIO) return null;
 
-  // Reject degenerate quads (points too close)
   const q = orderQuad([tl, tr, br, bl]);
   const sides = sideLengths(q);
-  if (Math.min(...sides) < Math.min(w, h) * 0.12) return null;
+  if (Math.min(...sides) < Math.min(w, h) * 0.08) return null;
   return q;
 }
 
-/**
- * Also try an axis-aligned tight bounding box of the blob as a fallback candidate.
- */
+/** Axis-aligned tight bounding box of the blob. */
 function blobBoundsQuad(mask: Uint8Array, w: number, h: number): Quad | null {
   let minX = w;
   let minY = h;
@@ -345,10 +669,9 @@ function blobBoundsQuad(mask: Uint8Array, w: number, h: number): Quad | null {
       if (y > maxY) maxY = y;
     }
   }
-  if (count < (w * h) * MIN_AREA_RATIO) return null;
-  // Inset slightly to avoid soft edges
-  const padX = Math.max(1, Math.round((maxX - minX) * 0.01));
-  const padY = Math.max(1, Math.round((maxY - minY) * 0.01));
+  if (count < w * h * MIN_AREA_RATIO) return null;
+  const padX = Math.max(1, Math.round((maxX - minX) * 0.012));
+  const padY = Math.max(1, Math.round((maxY - minY) * 0.012));
   minX = clamp(minX + padX, 0, w - 1);
   minY = clamp(minY + padY, 0, h - 1);
   maxX = clamp(maxX - padX, 0, w - 1);
@@ -362,10 +685,113 @@ function blobBoundsQuad(mask: Uint8Array, w: number, h: number): Quad | null {
   ];
 }
 
+/**
+ * Fit an axis-aligned bbox to card aspect (letterbox crop inside the bbox),
+ * then return as a quad — used when extreme-point quads are weak.
+ */
+function fitBoundsToCardAspect(bounds: Quad, imgW: number, imgH: number): Quad {
+  const minX = Math.min(bounds[0].x, bounds[3].x);
+  const maxX = Math.max(bounds[1].x, bounds[2].x);
+  const minY = Math.min(bounds[0].y, bounds[1].y);
+  const maxY = Math.max(bounds[2].y, bounds[3].y);
+  let bw = maxX - minX;
+  let bh = maxY - minY;
+  if (bw < 8 || bh < 8) return bounds;
+
+  const landscape = bw >= bh;
+  const target = landscape ? CARD_ASPECT : 1 / CARD_ASPECT;
+  const cur = bw / bh;
+  let x0 = minX;
+  let y0 = minY;
+  let x1 = maxX;
+  let y1 = maxY;
+
+  if (cur > target * 1.08) {
+    // Too wide — shrink width around center
+    const newW = bh * target;
+    const cx = (minX + maxX) / 2;
+    x0 = cx - newW / 2;
+    x1 = cx + newW / 2;
+  } else if (cur < target / 1.08) {
+    const newH = bw / target;
+    const cy = (minY + maxY) / 2;
+    y0 = cy - newH / 2;
+    y1 = cy + newH / 2;
+  }
+
+  x0 = clamp(x0, 0, imgW - 1);
+  y0 = clamp(y0, 0, imgH - 1);
+  x1 = clamp(x1, 0, imgW - 1);
+  y1 = clamp(y1, 0, imgH - 1);
+  return [
+    { x: x0, y: y0 },
+    { x: x1, y: y0 },
+    { x: x1, y: y1 },
+    { x: x0, y: y1 },
+  ];
+}
+
+/** Largest centered card-aspect rectangle with a small inset. */
+export function centerCardAspectQuad(
+  imgW: number,
+  imgH: number,
+  insetFrac = 0.06,
+): Quad {
+  const insetX = imgW * insetFrac;
+  const insetY = imgH * insetFrac;
+  const availW = imgW - 2 * insetX;
+  const availH = imgH - 2 * insetY;
+  const frameAspect = availW / availH;
+  let cropW: number;
+  let cropH: number;
+  // Prefer landscape 3.5:2 when frame is wider; portrait otherwise
+  if (frameAspect >= 1) {
+    // Try landscape card in frame
+    if (frameAspect >= CARD_ASPECT) {
+      cropH = availH;
+      cropW = cropH * CARD_ASPECT;
+    } else {
+      cropW = availW;
+      cropH = cropW / CARD_ASPECT;
+    }
+  } else {
+    // Portrait frame — portrait card (2:3.5)
+    const portrait = 1 / CARD_ASPECT;
+    if (frameAspect <= portrait) {
+      cropW = availW;
+      cropH = cropW / portrait;
+    } else {
+      cropH = availH;
+      cropW = cropH * portrait;
+    }
+  }
+  const x0 = (imgW - cropW) / 2;
+  const y0 = (imgH - cropH) / 2;
+  return [
+    { x: x0, y: y0 },
+    { x: x0 + cropW, y: y0 },
+    { x: x0 + cropW, y: y0 + cropH },
+    { x: x0, y: y0 + cropH },
+  ];
+}
+
+function consider(
+  candidates: Array<{ quad: Quad; score: number; kind: string }>,
+  q: Quad | null,
+  w: number,
+  h: number,
+  kind: string,
+  boost = 0,
+) {
+  if (!q) return;
+  const s = scoreQuad(q, w, h) + boost;
+  if (s > 0) candidates.push({ quad: q, score: s, kind });
+}
+
 /** Detect the dominant card quad in analysis coordinates. */
 export function detectCardQuad(
   bitmap: ImageBitmap,
-): { quad: Quad; scale: number; score: number } | null {
+): { quad: Quad; scale: number; score: number; kind: string } | null {
   const { canvas, scale } = drawScaled(bitmap, ANALYZE_MAX);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) return null;
@@ -374,32 +800,94 @@ export function detectCardQuad(
   const gray = toGray(img.data, w * h);
   const blurred = boxBlur(gray, w, h, 1);
   const edges = sobelMag(blurred, w, h);
-  const mask = buildCardMask(blurred, edges, w, h);
+  const { std } = grayStats(blurred);
 
-  const candidates: Quad[] = [];
-  const extreme = blobToQuad(mask, w, h);
-  if (extreme) candidates.push(extreme);
-  const bounds = blobBoundsQuad(mask, w, h);
-  if (bounds) candidates.push(bounds);
+  const candidates: Array<{ quad: Quad; score: number; kind: string }> = [];
 
-  let best: Quad | null = null;
-  let bestScore = 0;
-  for (const q of candidates) {
-    const s = scoreQuad(q, w, h);
-    if (s > bestScore) {
-      bestScore = s;
-      best = q;
+  // Pair a few adaptive + fixed thresholds (avoid O(thresholds×edges) blowup on phone).
+  const colorPasses: Array<[number, number]> = [
+    [Math.max(12, Math.min(28, std * 0.35)), 0.14],
+    [Math.max(16, Math.min(42, std * 0.55)), 0.2],
+    [Math.max(22, Math.min(55, std * 0.75)), 0.28],
+    [14, 0.18],
+    [36, 0.16],
+  ];
+
+  for (const [ct, ef] of colorPasses) {
+    const mask = maskFromColorDiff(blurred, edges, w, h, ct, ef);
+    const big = largestComponent(mask, w, h);
+    consider(candidates, blobToQuad(big, w, h), w, h, "color-extreme");
+    const bounds = blobBoundsQuad(big, w, h);
+    consider(candidates, bounds, w, h, "color-bounds");
+    if (bounds) {
+      consider(
+        candidates,
+        fitBoundsToCardAspect(bounds, w, h),
+        w,
+        h,
+        "color-fit",
+        0.02,
+      );
     }
   }
 
-  if (!best || bestScore < MIN_SCORE) return null;
-  return { quad: best, scale, score: bestScore };
+  for (const thresh of [30, 48, 70]) {
+    const mask = maskFromRgbDistance(img.data, w, h, thresh);
+    const big = largestComponent(mask, w, h);
+    consider(candidates, blobToQuad(big, w, h), w, h, "rgb-extreme");
+    const bounds = blobBoundsQuad(big, w, h);
+    consider(candidates, bounds, w, h, "rgb-bounds");
+    if (bounds) {
+      consider(
+        candidates,
+        fitBoundsToCardAspect(bounds, w, h),
+        w,
+        h,
+        "rgb-fit",
+        0.02,
+      );
+    }
+  }
+
+  for (const bright of [true, false]) {
+    const mask = maskFromOtsu(blurred, w, h, bright);
+    consider(candidates, blobToQuad(mask, w, h), w, h, "otsu-extreme");
+    const bounds = blobBoundsQuad(mask, w, h);
+    consider(candidates, bounds, w, h, "otsu-bounds");
+    if (bounds) {
+      consider(
+        candidates,
+        fitBoundsToCardAspect(bounds, w, h),
+        w,
+        h,
+        "otsu-fit",
+        0.015,
+      );
+    }
+  }
+
+  for (const ef of [0.16, 0.26]) {
+    const mask = maskFromEdges(edges, w, h, ef);
+    const big = largestComponent(mask, w, h);
+    consider(candidates, blobToQuad(big, w, h), w, h, "edge-extreme");
+    const bounds = blobBoundsQuad(big, w, h);
+    consider(candidates, bounds, w, h, "edge-bounds");
+  }
+
+  const brightQ = brightRectQuad(blurred, w, h);
+  consider(candidates, brightQ, w, h, "bright-rect", 0.01);
+
+  let best: (typeof candidates)[0] | null = null;
+  for (const c of candidates) {
+    if (!best || c.score > best.score) best = c;
+  }
+
+  if (!best || best.score < WEAK_SCORE) return null;
+  return { quad: best.quad, scale, score: best.score, kind: best.kind };
 }
 
 /** Solve 8×8 homography mapping src → dst (perspective). */
 function getPerspectiveTransform(src: Quad, dst: Quad): Float64Array {
-  // h = [a b c d e f g h] for
-  // x' = (ax+by+c)/(gx+hy+1), y' = (dx+ey+f)/(gx+hy+1)
   const A: number[][] = [];
   const b: number[] = [];
   for (let i = 0; i < 4; i++) {
@@ -411,7 +899,6 @@ function getPerspectiveTransform(src: Quad, dst: Quad): Float64Array {
     A.push([0, 0, 0, x, y, 1, -x * v, -y * v]);
     b.push(v);
   }
-  // Gaussian elimination
   const m = A.map((row, i) => [...row, b[i]]);
   const n = 8;
   for (let col = 0; col < n; col++) {
@@ -435,7 +922,6 @@ function getPerspectiveTransform(src: Quad, dst: Quad): Float64Array {
 }
 
 function invertHomography(h: Float64Array): Float64Array | null {
-  // Full 3×3 with h8=1
   const H = [
     [h[0], h[1], h[2]],
     [h[3], h[4], h[5]],
@@ -463,7 +949,6 @@ function invertHomography(h: Float64Array): Float64Array | null {
       (H[0][0] * H[1][1] - H[0][1] * H[1][0]) / det,
     ],
   ];
-  // Normalize so inv[2][2] == 1
   const s = inv[2][2];
   if (Math.abs(s) < 1e-12) return null;
   return new Float64Array([
@@ -588,34 +1073,66 @@ export function warpCardToCanvas(
 export type CropAttempt = {
   /** Canvas or original bitmap ready to compress. */
   source: ImageBitmap | HTMLCanvasElement;
+  /** True when a card region was isolated (detection or center fit). */
   cropped: boolean;
-  /** True when we intentionally skipped / failed detection. */
+  /** True when we used the centered card-aspect fallback (not a detected quad). */
+  fitted: boolean;
+  /** True only when we kept the unchanged full frame. */
   skipped: boolean;
 };
 
 /**
  * Detect the card, perspective-correct, and fit to ~3.5×2.
- * On weak detection, returns the original bitmap unchanged (never throws for soft fails).
+ * Falls back to bbox fit, then center card-aspect crop — almost never leaves
+ * the full uncropped photo.
  */
 export async function cropBusinessCard(bitmap: ImageBitmap): Promise<CropAttempt> {
   try {
     const detected = detectCardQuad(bitmap);
-    if (!detected) {
-      return { source: bitmap, cropped: false, skipped: true };
+    if (detected && detected.score >= WEAK_SCORE) {
+      const { quad, scale } = detected;
+      const full: Quad = orderQuad(
+        quad.map((p) => ({ x: p.x / scale, y: p.y / scale })),
+      );
+      const warped = warpCardToCanvas(bitmap, full);
+      if (warped) {
+        return {
+          source: warped,
+          cropped: true,
+          fitted: false,
+          skipped: false,
+        };
+      }
     }
 
-    // Map analysis-space quad → full-resolution
-    const { quad, scale } = detected;
-    const full: Quad = orderQuad(
-      quad.map((p) => ({ x: p.x / scale, y: p.y / scale })),
-    );
-
-    const warped = warpCardToCanvas(bitmap, full);
-    if (!warped) {
-      return { source: bitmap, cropped: false, skipped: true };
+    // Fallback B: center card-aspect crop → warp/fit to 3.5×2 output
+    const center = centerCardAspectQuad(bitmap.width, bitmap.height, 0.06);
+    const fittedCanvas = warpCardToCanvas(bitmap, center);
+    if (fittedCanvas) {
+      return {
+        source: fittedCanvas,
+        cropped: true,
+        fitted: true,
+        skipped: false,
+      };
     }
-    return { source: warped, cropped: true, skipped: false };
+
+    return { source: bitmap, cropped: false, fitted: false, skipped: true };
   } catch {
-    return { source: bitmap, cropped: false, skipped: true };
+    try {
+      const center = centerCardAspectQuad(bitmap.width, bitmap.height, 0.06);
+      const fittedCanvas = warpCardToCanvas(bitmap, center);
+      if (fittedCanvas) {
+        return {
+          source: fittedCanvas,
+          cropped: true,
+          fitted: true,
+          skipped: false,
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return { source: bitmap, cropped: false, fitted: false, skipped: true };
   }
 }

@@ -116,10 +116,12 @@ export function CaptureDialog() {
     if (!file) return;
     setBusy(true);
     try {
-      const { dataUrl, cropped, cropSkipped } = await fileToCompressedDataUrl(file);
+      const { dataUrl, cropped, fitted, cropSkipped } = await fileToCompressedDataUrl(file);
       if (targetSide.current === "front") setFront(dataUrl);
       else setBack(dataUrl);
-      if (cropped) {
+      if (fitted) {
+        toast.message("Fitted card to frame");
+      } else if (cropped) {
         toast.message("Card cropped to fit");
       } else if (cropSkipped) {
         toast.message("Couldn't isolate the card — saved full photo");
