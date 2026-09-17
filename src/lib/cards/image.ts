@@ -1,7 +1,4 @@
-import { cropBusinessCard } from "./crop";
-import { enhanceClarity } from "./clarity";
-
-/** Working-copy longest side after load (crop/clarity/compress never see native MP). */
+/** Working-copy longest side after load (compress never sees native MP). */
 const WORK_MAX = 1600;
 /** Stricter cap for very large phone photos (e.g. 12MP+). */
 const WORK_MAX_HUGE = 1280;
@@ -99,18 +96,6 @@ async function loadWorkingBitmap(blob: Blob): Promise<ImageBitmap> {
   }
 }
 
-export type CompressedPhoto = {
-  dataUrl: string;
-  /** True when the card region was isolated and perspective-corrected. */
-  cropped: boolean;
-  /** True when we used a centered card-aspect fit (no strong quad). */
-  fitted: boolean;
-  /** True when a soft-shot clarity pass was applied. */
-  sharpened: boolean;
-  /** True when crop failed and we kept the unchanged full frame. */
-  cropSkipped: boolean;
-};
-
 /** Compress a captured photo into a JPEG data URL small enough for localStorage. */
 export async function compressImage(
   source: ImageBitmap | HTMLCanvasElement,
@@ -133,11 +118,10 @@ export async function compressImage(
 }
 
 /**
- * Load → downscale → crop card (best effort) → clarity if soft → JPEG compress.
- * Never blocks capture on crop/clarity/OOM failure — prefers a fitted/compressed
- * photo over crashing with “low memory”.
+ * Load → downscale for OOM safety → JPEG compress.
+ * No auto-crop / perspective warp / clarity — manual CropEditor handles framing.
  */
-export async function fileToCompressedDataUrl(file: File): Promise<CompressedPhoto> {
+export async function fileToCompressedDataUrl(file: File): Promise<string> {
   if (!file.type.startsWith("image/") && file.type !== "") {
     throw new Error("Please choose a photo of the card.");
   }
@@ -150,47 +134,12 @@ export async function fileToCompressedDataUrl(file: File): Promise<CompressedPho
     throw new Error("That photo format is not supported. Try a JPEG or PNG.");
   }
 
-  let cropped = false;
-  let fitted = false;
-  let cropSkipped = false;
-  let sharpened = false;
-  let working: ImageBitmap | HTMLCanvasElement = bitmap;
-
   try {
     try {
-      const crop = await cropBusinessCard(bitmap);
-      working = crop.source;
-      cropped = crop.cropped;
-      fitted = crop.fitted;
-      cropSkipped = crop.skipped;
+      return await compressImage(bitmap);
     } catch {
-      working = bitmap;
-      cropSkipped = true;
-      cropped = false;
-      fitted = false;
-    }
-
-    try {
-      const clarity = enhanceClarity(working);
-      working = clarity.source;
-      sharpened = clarity.sharpened;
-    } catch {
-      // keep working as-is
-    }
-
-    try {
-      const dataUrl = await compressImage(working);
-      return { dataUrl, cropped, fitted, sharpened, cropSkipped };
-    } catch {
-      // OOM / encode failure: last-resort simple JPEG of the working bitmap
-      const dataUrl = await compressImage(bitmap);
-      return {
-        dataUrl,
-        cropped: false,
-        fitted: false,
-        sharpened: false,
-        cropSkipped: true,
-      };
+      // OOM / encode failure: last-resort simple JPEG
+      return encode(bitmap, bitmap.width, bitmap.height, 800, 0.5);
     }
   } finally {
     try {

@@ -67,6 +67,8 @@ export function CaptureDialog() {
   const targetSide = useRef<"front" | "back">("front");
   /** True while native camera/file picker is open — ignore Dialog dismiss. */
   const pickingRef = useRef(false);
+  /** Bumped to invalidate stale pick→focus clear timers (Chrome camera return). */
+  const pickingGenRef = useRef(0);
 
   useEffect(() => {
     if (!open) return;
@@ -122,9 +124,12 @@ export function CaptureDialog() {
     // Opening the native picker blurs the dialog on many phones and fires
     // onOpenChange(false). Hold the dialog open until the pick settles.
     pickingRef.current = true;
+    const gen = ++pickingGenRef.current;
     const clearPicking = () => {
       window.setTimeout(() => {
-        pickingRef.current = false;
+        // Only clear if no file arrived (onFile bumps gen) — Chrome fires
+        // focus before change, and photo load can take longer than 600ms.
+        if (pickingGenRef.current === gen) pickingRef.current = false;
       }, 600);
       window.removeEventListener("focus", clearPicking);
     };
@@ -138,27 +143,34 @@ export function CaptureDialog() {
       return;
     }
     // Keep ignore-dismiss until cropSession is set (or failure).
+    // Chrome (esp. Android) blurs/dismisses the dialog when the camera picker
+    // closes — pickingRef must stay true through load + crop open.
+    pickingGenRef.current += 1; // invalidate pick()'s focus clear timer
     pickingRef.current = true;
     setBusy(true);
     try {
-      const { dataUrl, cropped, fitted, cropSkipped } = await fileToCompressedDataUrl(file);
-      if (fitted) {
-        toast.message("Fitted card to frame — adjust if needed");
-      } else if (cropped) {
-        toast.message("Card cropped — adjust if needed");
-      } else if (cropSkipped) {
-        toast.message("Couldn't isolate the card — adjust the crop");
-      }
-      setCropSession({
-        src: dataUrl,
-        side: targetSide.current,
-        mode: "new",
+      const dataUrl = await fileToCompressedDataUrl(file);
+      const side = targetSide.current;
+      // Defer so Chrome finishes focus/blur after the file input before we
+      // mount the full-screen crop portal (avoids dropping cropSession).
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          window.setTimeout(() => {
+            setCropSession({ src: dataUrl, side, mode: "new" });
+            resolve();
+          }, 0);
+        });
       });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not use that photo");
-    } finally {
       pickingRef.current = false;
+    } finally {
       setBusy(false);
+      // Hold dismiss-guard a beat after crop opens so Chrome's post-picker
+      // blur cannot close the dialog before cropSession paints.
+      window.setTimeout(() => {
+        pickingRef.current = false;
+      }, 500);
     }
   };
 
@@ -298,7 +310,7 @@ export function CaptureDialog() {
         }
       }}>
         {/* Native camera UI (capture=environment) handles continuous AF where the OS supports it;
-            there is no getUserMedia preview — post-capture crop + clarity are the in-app fixes. */}
+            there is no getUserMedia preview — manual CropEditor is the in-app framing step. */}
         <input
           ref={cameraRef}
           type="file"
@@ -369,7 +381,7 @@ export function CaptureDialog() {
               </DialogTitle>
               <DialogDescription>
                 {side === "front"
-                  ? "Photograph the card on a contrasting surface. Folio crops it to size and sharpens soft shots."
+                  ? "Photograph the card, then crop it to the card frame."
                   : "Optional. The reverse often holds an address or extra lines."}
               </DialogDescription>
             </DialogHeader>
